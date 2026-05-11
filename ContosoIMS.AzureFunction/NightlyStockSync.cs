@@ -75,12 +75,15 @@ namespace ContosoIMS.AzureFunction
                     ColumnSet = new ColumnSet(
                         "cim_transactiontype",
                         "cim_quantity",
-                        "cim_transactiondate"
+                        "cim_transactiondate",
+                        "cim_stockbefore",
+                        "cim_stockafter"
                     )
                 };
                 txnQuery.Criteria.AddCondition(
                     "cim_product", ConditionOperator.Equal, productId
                 );
+                txnQuery.AddOrder("cim_transactiondate", OrderType.Ascending);
 
                 var transactions = (await svc.RetrieveMultipleAsync(txnQuery)).Entities;
 
@@ -95,11 +98,19 @@ namespace ContosoIMS.AzureFunction
                                  ?.Value == 767270001)  // Outbound
                     .Sum(t => t.GetAttributeValue<int>("cim_quantity"));
 
-                int calculatedStock = totalInbound - totalOutbound;
-                bool discrepancy = Math.Abs(calculatedStock - stockNow) > 0;
-                int discrepancyAmt = discrepancy
-                    ? Math.Abs(calculatedStock - stockNow)
-                    : 0;
+                // ─── Detect discrepancy: compare last transaction's Stock After with current stock
+                bool discrepancy = false;
+                int discrepancyAmt = 0;
+
+                if (transactions.Count > 0)
+                {
+                    var lastTransaction = transactions.Last();
+                    int lastStockAfter = lastTransaction.GetAttributeValue<int>("cim_stockafter");
+
+                    // Discrepancy only if the latest Stock After doesn't match current stock
+                    discrepancy = lastStockAfter != stockNow;
+                    discrepancyAmt = discrepancy ? Math.Abs(lastStockAfter - stockNow) : 0;
+                }
 
                 // ─── Step 4: Movement ranking (last 30 days outbound) ─────────
                 int recentOutbound = transactions.Count(t =>
@@ -120,10 +131,10 @@ namespace ContosoIMS.AzureFunction
 
                 _logger.LogInformation(
                     "SKU={Sku} | Inbound={In} | Outbound={Out} | " +
-                    "Calculated={Calc} | Current={Now} | " +
+                    "Current={Now} | " +
                     "Discrepancy={Disc} | Movement={Move}",
                     sku, totalInbound, totalOutbound,
-                    calculatedStock, stockNow,
+                    stockNow,
                     discrepancy, movementTagValue
                 );
 
@@ -147,8 +158,8 @@ namespace ContosoIMS.AzureFunction
                 if (discrepancy)
                 {
                     _logger.LogWarning(
-                        "Discrepancy on {Sku}: Current={Now}, Calculated={Calc}, Diff={Diff}",
-                        sku, stockNow, calculatedStock, discrepancyAmt
+                        "Discrepancy on {Sku}: Current={Now}, Diff={Diff}",
+                        sku, stockNow, discrepancyAmt
                     );
                     // Note: Product table has no cim_discrepancyflagged / cim_lastdiscrepancydate columns.
                     // Discrepancy is already captured on the snapshot (cim_consistencyflag, cim_discrepancyamount).
